@@ -1,0 +1,256 @@
+# Copyright 2024 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Magika (the Python library).
+
+This module provides the `Magika` class, the main entry point for using Magika
+to identify file content types, backed by the PyO3 native Rust extension.
+"""
+
+from __future__ import annotations
+
+import io
+import logging
+import os
+from pathlib import Path
+from typing import Any, BinaryIO, List, Optional, Sequence, Union
+
+from magika.logger import get_logger
+from magika.types import (
+    ContentTypeInfo,
+    ContentTypeLabel,
+    MagikaError,
+    MagikaPrediction,
+    MagikaResult,
+    OverwriteReason,
+    PredictionMode,
+    Status,
+)
+
+from . import _magika
+
+_DEFAULT_MODEL_NAME = "standard_v3_3"
+
+
+class Magika:
+    """Main Magika class for content type identification.
+
+    This class provides methods to identify the content type of files, bytes,
+    and streams by delegating to the native Rust core via PyO3.
+    """
+
+    def __init__(
+        self,
+        model_dir: Optional[Path] = None,
+        prediction_mode: PredictionMode = PredictionMode.HIGH_CONFIDENCE,
+        no_dereference: bool = False,
+        verbose: bool = False,
+        debug: bool = False,
+        use_colors: bool = False,
+        rules: Optional[str] = None,
+        rules_files: Optional[Sequence[Union[str, os.PathLike]]] = None,
+    ) -> None:
+        """Initializes the Magika instance.
+
+        Args:
+            model_dir: Path to the directory containing the model and its
+                configuration. If None, the default model is used.
+            prediction_mode: The prediction mode to use. Defaults to
+                PredictionMode.HIGH_CONFIDENCE.
+            no_dereference: If True, do not follow symlinks. Defaults to False.
+            verbose: If True, enable verbose logging. Defaults to False.
+            debug: If True, enable debug logging. Defaults to False.
+            use_colors: If True, use colors in the logger. Defaults to False.
+            rules: Custom format rules, as YARA text, checked before the
+                resolvers. They use the YARA subset and metadata of the
+                `magika-rules` crate. Raises ValueError if they are invalid.
+            rules_files: Paths of files holding custom rules, as an
+                alternative to `rules`.
+        """
+        self._log = get_logger(use_colors=use_colors)
+
+        if verbose:
+            self._log.setLevel(logging.INFO)
+
+        if debug:
+            self._log.setLevel(logging.DEBUG)
+
+        if model_dir is not None:
+            if not model_dir.is_dir():
+                raise MagikaError(f"model dir not found at {str(model_dir)}")
+            raise NotImplementedError(
+                f"Custom model_dir '{model_dir}' is not supported by the Rust backend."
+            )
+
+        self._prediction_mode = prediction_mode
+        self._no_dereference = no_dereference
+
+        self._pyo3_session = _magika.Magika(
+            prediction_mode=self._prediction_mode,
+            follow_symlink=not self._no_dereference,
+            rules=rules,
+            rules_files=None if rules_files is None else [str(p) for p in rules_files],
+        )
+
+    def __repr__(self) -> str:
+        return str(self)
+
+    def __str__(self) -> str:
+        return (
+            f'Magika(module_version="{self.get_module_version()}", '
+            f'model_name="{self.get_model_name()}")'
+        )
+
+    def get_module_version(self) -> str:
+        """Gets the version of the Magika Python module."""
+        return str(__import__(self.__module__).__version__)
+
+    def get_model_name(self) -> str:
+        """Gets the name of the loaded model."""
+        return str(self._pyo3_session.get_model_name())
+
+    def _convert_pyo3_result(self, pyo3_res: Any, path: Path) -> MagikaResult:
+        status = Status(pyo3_res.status)
+
+        if not pyo3_res.ok:
+            return MagikaResult(path=path, status=status, prediction=None)
+
+        dl_type_info = _magika.content_type_from_label(pyo3_res.dl_label)
+        assert dl_type_info is not None
+        dl_info = ContentTypeInfo(
+            label=ContentTypeLabel(dl_type_info.label),
+            mime_type=dl_type_info.mime_type,
+            group=dl_type_info.group,
+            description=dl_type_info.description,
+            extensions=dl_type_info.extensions,
+            is_text=dl_type_info.is_text,
+        )
+        output_info = ContentTypeInfo(
+            label=ContentTypeLabel(pyo3_res.label),
+            mime_type=pyo3_res.mime_type,
+            group=pyo3_res.group,
+            description=pyo3_res.description,
+            extensions=pyo3_res.extensions,
+            is_text=pyo3_res.is_text,
+        )
+        overwrite_reason = OverwriteReason(pyo3_res.overwrite_reason)
+
+        prediction = MagikaPrediction(
+            dl=dl_info,
+            output=output_info,
+            score=pyo3_res.score,
+            overwrite_reason=overwrite_reason,
+        )
+        return MagikaResult(path=path, status=status, prediction=prediction)
+
+    def identify_path(self, path: Union[str, os.PathLike]) -> MagikaResult:
+        """Identify the content type of a file given its path."""
+        if not isinstance(path, (str, os.PathLike)):
+            raise TypeError(
+                f"Path '{path}' is invalid: input path should be of type `Union[str, os.PathLike]`"
+            )
+        path = Path(path)
+        pyo3_res = self._pyo3_session.identify_path(str(path))
+        return self._convert_pyo3_result(pyo3_res, path)
+
+    def identify_paths(
+        self, paths: Sequence[Union[str, os.PathLike]]
+    ) -> List[MagikaResult]:
+        """Identify the content type of a list of files given their paths."""
+        if not isinstance(paths, Sequence):
+            raise TypeError("Input paths should be of type Sequence[Path]")
+
+        paths_ = []
+        for path in paths:
+            if not isinstance(path, (str, os.PathLike)):
+                raise TypeError(
+                    f"Input '{path}' is invalid: input path should be of type `Union[str, os.PathLike]`"
+                )
+            paths_.append(Path(path))
+
+        pyo3_results = self._pyo3_session.identify_paths([str(p) for p in paths_])
+        return [
+            self._convert_pyo3_result(res, p) for res, p in zip(pyo3_results, paths_)
+        ]
+
+    def identify_bytes(self, content: bytes) -> MagikaResult:
+        """Identify the content type of raw bytes."""
+        if not isinstance(content, bytes):
+            raise TypeError(
+                f"Input content should be of type 'bytes', not {type(content)}."
+            )
+
+        pyo3_res = self._pyo3_session.identify_bytes(content)
+        return self._convert_pyo3_result(pyo3_res, Path("-"))
+
+    def identify_stream(self, stream: BinaryIO) -> MagikaResult:
+        """Identify the content type of a BinaryIO stream.
+
+        Identifies the content type from an already-open binary file-like object
+        (e.g., the output of `open(file_path, 'rb')`). Note: 1) Magika will
+        `seek()` around the stream; 2) the stream _is not closed_ (closing it is
+        the responsibility of the caller).
+        """
+        # Explicitly test for the most common error so that we can return an
+        # helpful error message.
+        stream_obj: object = stream
+        if isinstance(stream_obj, io.TextIOBase):
+            raise TypeError(
+                "Input stream must be opened in bytes mode, not in text mode."
+            )
+
+        if not isinstance(stream_obj, io.BufferedIOBase) or not stream.readable():
+            raise TypeError("Input stream must be a readable BinaryIO object.")
+
+        if (
+            not hasattr(stream, "seek")
+            or not hasattr(stream, "read")
+            or not hasattr(stream, "tell")
+        ):
+            raise TypeError("Input stream must have seek, read, and tell methods.")
+
+        block_size = 4096
+        try:
+            current_position = stream.tell()
+            stream.seek(0, os.SEEK_END)
+            stream_size = stream.tell()
+            if stream_size <= 2 * block_size:
+                stream.seek(0)
+                content = stream.read(stream_size)
+            else:
+                stream.seek(0)
+                beg_block = stream.read(block_size)
+                stream.seek(stream_size - block_size)
+                end_block = stream.read(block_size)
+                content = beg_block + end_block
+            return self.identify_bytes(content)
+        finally:
+            stream.seek(current_position)
+
+    def get_output_content_types(self) -> List[ContentTypeLabel]:
+        """This method returns the list of all possible output content types."""
+        return [
+            ContentTypeLabel(ct) for ct in self._pyo3_session.get_output_content_types()
+        ]
+
+    def get_model_content_types(self) -> List[ContentTypeLabel]:
+        """This method returns the list of all possible output of the model."""
+        return [
+            ContentTypeLabel(ct) for ct in self._pyo3_session.get_model_content_types()
+        ]
+
+    @staticmethod
+    def _get_default_model_name() -> str:
+        """Returns the default model name."""
+        return str(_magika.get_default_model_name())

@@ -1,0 +1,133 @@
+#!/bin/bash
+# Copyright 2024 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+set -e
+. ../color.sh
+
+PROFILE=release-fast
+
+x cargo check
+x cargo check --features=_trace
+x cargo build --profile=$PROFILE
+x cargo fmt -- --check
+x cargo clippy -- --deny=warnings
+x cargo clippy --features=_trace -- --deny=warnings
+
+PATH=$(dirname $PWD)/target/$PROFILE:$PATH
+
+TEST_SUITES='basic previous_missdetections'
+test_suite() {
+  local incomplete="$1"; shift
+  info "Test against the test suites ($TEST_SUITES) with $*"
+  ( cd ../../tests_data
+    magika "$@" --format='%p: %l' --recursive $TEST_SUITES | {
+      decided=0
+      while read line; do
+        file=${line%: *}
+        directory=${file%/*}
+        expected=${directory##*/}
+        actual=${line#*: }
+        if [ $incomplete = y ]; then
+          case "$actual" in
+            txt|unknown) continue ;;
+          esac
+        fi
+        [ "$expected" = "$actual" ] || error "$file is detected as $actual"
+      done
+    }
+  )
+}
+test_suite y --no-model
+test_suite n --no-resolvers
+
+info "Test custom rules"
+( cd ../../tests_data
+  [ "$(magika --custom-rules-file=rules/custom.yar --custom-rules-check)" = \
+    'Rules { content_types: [Png] }' ] || error "custom rules check"
+  [ "$(magika --no-model --format=%l basic/png/magika_test.png)" = unknown ] \
+    || error "resolvers identify PNG"
+  [ "$(magika --no-model --custom-rules-file=rules/custom.yar --format=%l \
+    basic/png/magika_test.png)" = png ] || error "custom rules do not identify PNG"
+  [ "$(magika --no-resolvers --custom-rules-file=rules/custom.yar --format=%l \
+    basic/png/magika_test.png)" = png ] || error "custom rules do not apply without resolvers"
+  broken=$(mktemp)
+  trap "rm -f $broken" EXIT
+  echo 'rule broken {' > "$broken"
+  magika --custom-rules-file="$broken" basic/png/magika_test.png 2>&1 | grep -q 'line 2, column 1' \
+    || error "invalid custom rules are not reported"
+)
+
+info "Test symlinks"
+[ "$(magika --format=%l LICENSE)" = txt ] || error "does not follow symlinks"
+[ "$(magika --format=%l --no-dereference LICENSE)" = symlink ] || error "follows symlinks"
+
+test_error() {
+  files="$1"
+  expected="$2"
+  ( set +e
+    actual="$(magika $files)"
+    code=$?
+    [ $code -eq 1 ] || error "invalid exit code for magika $files"
+    [ "$actual" = "$expected" ] || error "invalid output for magika $files"
+  )
+}
+
+if [ $(id -u) -ne 0 -a -e /run/systemd/inaccessible ]; then
+  info "Test permission error and non-regular files"
+  test_error '-r /run/systemd/inaccessible' \
+'/run/systemd/inaccessible/blk: Unsupported file type (inode)
+/run/systemd/inaccessible/chr: Unsupported file type (inode)
+/run/systemd/inaccessible/dir: Permission denied (os error 13) (error)
+/run/systemd/inaccessible/fifo: Unsupported file type (inode)
+/run/systemd/inaccessible/reg: Permission denied (os error 13) (error)
+/run/systemd/inaccessible/sock: Unsupported file type (inode)'
+fi
+
+info "Test nonexistent files"
+test_error 'non_existent src/main.rs' "\
+non_existent: No such file or directory (os error 2) (error)
+src/main.rs: Rust source (code)"
+
+info "Test file names that are not UTF-8"
+test_error "$(printf 'f\xff')" "\
+f�: No such file or directory (os error 2) (error)"
+test_error "--json $(printf 'f\xff')" '[
+  {
+    "path": "f�",
+    "result": {
+      "status": "file_does_not_exist"
+    }
+  }
+]'
+
+info "Test directory cycles"
+( dir=$(mktemp -d)
+  trap "rm -rf $dir" EXIT
+  mkdir -p $dir/tree/sub
+  touch $dir/tree/empty
+  ln -s .. $dir/tree/sub/back
+  ln -s tree $dir/sibling
+  test_error "-r $dir" "\
+$dir/sibling/empty: Empty file (inode)
+$dir/sibling/sub/back: Directory cycle (error)
+$dir/tree/empty: Empty file (inode)
+$dir/tree/sub/back: Directory cycle (error)"
+)
+
+info "Test exit code with broken pipe"
+magika -r ../../tests_data | head -n1 >/dev/null
+[ "${PIPESTATUS[0]}" -eq 0 ] || error "non-zero exit code with broken pipe"
+
+success "Exit shell"

@@ -1,0 +1,68 @@
+#!/bin/sh
+# Copyright 2024 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+set -e
+. ./color.sh
+
+info "Sync bundled rules"
+( cd rules
+  cargo run --bin=gen --no-default-features --features=_gen
+)
+
+info "Sync generated files"
+( cd gen; cargo run; )
+
+info "Sync embedded model"
+( cd tract-bench
+  cargo run --bin=convert-model --no-default-features --features=convert -- \
+    ../gen/model/model.onnx ../tract-runtime/models/model.{nnef.tgz,probe.f32le,graph.json,weights}
+)
+
+info "Sync CLI output"
+( cd cli; cargo build --profile=release-fast; )
+PATH=$PWD/target/release-fast:$PATH
+( cd ../tests_data/basic
+  set -x
+  magika rust/code.rs
+  env -u COLORTERM magika rust/code.rs --colors
+  magika rust/code.rs --output-score
+  magika rust/code.rs --json
+  magika rust/code.rs python/code.py --json
+  magika rust/code.rs --jsonl
+  magika rust/code.rs python/code.py --jsonl
+  magika rust/code.rs --mime-type
+) > cli/output 2>&1
+
+info "Updating CLI output in README.md"
+( cd cli
+  for i in $(seq 1 $(grep '^% ' README.md | wc -l)); do
+    grep -n '^% ' README.md | cut -f1 -d: | head -n$i | tail -n1 | while read line; do
+      sed_i $line',/```/{'$line'p;/```/!d;}' README.md
+      cmd="$(head -n$line README.md | tail -n1 | sed 's/^% //')"
+      ( cd ../..; eval "$cmd"; ) 2>/dev/null > tmp
+      sed_i $line'r tmp' README.md
+    done
+  done
+  rm tmp
+  sed_i 's/  *$//' README.md
+)
+
+if [ "$1" = --check ]; then
+  if ! git diff --exit-code; then
+    [ -n "$CI" ] && todo 'Execute ./sync.sh from the rust directory'
+    error 'Generated files are not in sync'
+  fi
+fi
+success "Generated files are synced"
