@@ -1,0 +1,22 @@
+*.pyc
+__pycache__/
+**/.ruff_cache/
+.ipynb_checkpoints
+venv/
+.env
+*.swp
+*.h5
+*.egg-info
+dist/*
+*.pickle
+*.so
+*.pyd
+wheel_data/scripts/*
+!wheel_data/scripts/.gitkeep
+.s.yml
+
+# Unit test / coverage reports
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/

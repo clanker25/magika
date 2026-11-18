@@ -1,0 +1,24 @@
+{
+    "compilerOptions": {
+        "allowSyntheticDefaultImports": false,
+        "baseUrl": ".",
+        "declaration": true,
+        "downlevelIteration": true,
+        "esModuleInterop": false,
+        "inlineSourceMap": true,
+        "lib": ["esnext"],
+        "listEmittedFiles": false,
+        "listFiles": false,
+        "noFallthroughCasesInSwitch": false,
+        "pretty": true,
+        "resolveJsonModule": false,
+        "rootDir": ".",
+        "skipLibCheck": true,
+        "strict": true,
+        "traceResolution": false,
+        "types": ["node", "jest"]
+    },
+    "compileOnSave": false,
+    "exclude": ["node_modules", "dist"],
+    "include": ["src", "magika-cli.ts", "magika.ts", "magika-node.ts"]
+}
